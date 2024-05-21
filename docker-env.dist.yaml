@@ -1,0 +1,14 @@
+parameters:
+  flavor: <vm flavor>
+  image: <image-id>
+  volume_size: 10
+  public_net: <public network name>
+  private_net_name: <private network name>
+  private_net_cidr: 10.100.0.0/24
+  key_name: <key pair name>
+  host_name: <fqhn>
+  lb_public_ip: <id of existing floating ip>
+  container_port: 80
+  host_port: 8080
+  container_image: "docker.io/nginx"
+  loadbalancer_port: 80

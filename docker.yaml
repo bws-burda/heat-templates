@@ -1,0 +1,180 @@
+heat_template_version: 2021-04-16
+
+description: >
+  HOT template to create a new neutron network plus a router to the public
+  network and for deploying a server with Docker into the network. The template also
+  adds a load balancer and L7 rules so that containers are accessible from the
+  public network.
+
+parameters:
+  key_name:
+    type: string
+    description: Name of keypair to assign to servers
+  image:
+    type: string
+    description: Name of image to use for servers
+  flavor:
+    type: string
+    description: Flavor to use for servers
+  public_net:
+    type: string
+    description: >
+      ID or name of public network for which floating IP addresses will be allocated
+  private_net_name:
+    type: string
+    description: Name of private network to be created
+  private_net_cidr:
+    type: string
+    description: Private network address (CIDR notation)
+  host_name:
+    type: string
+    description: name of the DNS entry for the load balancer ip
+  lb_public_ip:
+    type: string
+    description: floating ip for the loadbalancer
+  container_port:
+    type: number
+    description: port of the application in the container
+  host_port:
+    type: number
+    description: port on the host to publish the container port
+  container_image:
+    type: string
+    description: image to run in Docker
+  volume_size:
+    type: number
+    description: size in GB of the server's root disk
+  loadbalancer_port:
+    type: number
+    description: port of the loadbalancer
+
+resources:
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_net_name }
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: { get_param: private_net_cidr }
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: public_net }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+  security_group:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: { get_param: host_port }
+          port_range_max: { get_param: host_port }
+
+  server_volume:
+    type: OS::Cinder::Volume
+    properties:
+      size: { get_param: volume_size }
+      image: { get_param: image }
+
+  server_cloud_config:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        runcmd:
+          - str_replace:
+              params:
+                $container_image: { get_param: container_image }
+                $container_port: { get_param: container_port }
+                $host_port: { get_param: host_port }
+              template: docker run -d -p $host_port:$container_port $container_image
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name: Docker-Server
+      block_device_mapping:
+        - volume_id: { get_resource: server_volume }
+          delete_on_termination: true
+          device_name: "vda"
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: server_port }
+      user_data_format: RAW
+      user_data: { get_resource: server_cloud_config }
+
+  server_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: private_net }
+      fixed_ips:
+        - subnet_id: { get_resource: private_subnet }
+      security_groups: [{ get_resource: security_group }]
+
+  lb_l7_policy:
+    type: OS::Octavia::L7Policy
+    properties:
+      action: "REDIRECT_TO_POOL"
+      listener: { get_resource: "lb_listener" }
+      redirect_pool: { get_resource: "lb_pool" }
+
+  lb_l7_rule_hostname:
+    type: OS::Octavia::L7Rule
+    properties:
+      compare_type: "EQUAL_TO"
+      l7policy: { get_resource: "lb_l7_policy" }
+      type: "HOST_NAME"
+      value: { get_param: "host_name" }
+
+  lb_monitor:
+    type: "OS::Octavia::HealthMonitor"
+    properties:
+      delay: 3
+      max_retries: 9
+      timeout: 3
+      type: "HTTP"
+      pool: { get_resource: "lb_pool" }
+
+  lb_listener:
+    type: "OS::Octavia::Listener"
+    properties:
+      protocol_port: { get_param: "loadbalancer_port" }
+      protocol: "HTTP"
+      loadbalancer: { get_resource: "loadbalancer" }
+
+  loadbalancer:
+    type: "OS::Octavia::LoadBalancer"
+    properties:
+      vip_subnet: { get_resource: "private_subnet" }
+
+  lb_pool_member:
+    type: "OS::Octavia::PoolMember"
+    properties:
+      subnet: { get_resource: "private_subnet" }
+      protocol_port: { get_param: "host_port" }
+      pool: { get_resource: "lb_pool" }
+      address: { get_attr: ["server", "first_address"] }
+
+  lb_pool:
+    type: "OS::Octavia::Pool"
+    properties:
+      lb_algorithm: "ROUND_ROBIN"
+      protocol: "HTTP"
+      loadbalancer: { get_resource: "loadbalancer" }
+
+  lb_ip_assigment:
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_param: "lb_public_ip" }
+      port_id: { get_attr: [ "loadbalancer", "vip_port_id"]}
