@@ -1,0 +1,65 @@
+heat_template_version: 2021-04-16
+
+parameters:
+  name:
+    type: string
+    description: name of the server
+    default: ""
+  flavor:
+    type: string
+    description: id or name of flavor
+  image:
+    type: string
+    description: id or name of image
+  volume_size:
+    type: number
+    description: size of volume in GB
+  volume_type:
+    type: string
+    description: type of the volume
+  security_groups:
+    type: comma_delimited_list
+    description: list of security groups to apply to host
+  private_net:
+    type: string
+    description: id of the private net
+  private_subnet:
+    type: string
+    description: id of the private subnet
+  tags:
+    type: comma_delimited_list
+    description: list of tags
+  user_data:
+    type: string
+    description: user data for server instance
+
+resources:
+  server_volume:
+    type: OS::Cinder::Volume
+    properties:
+      size: { get_param: volume_size }
+      image: { get_param: image }
+      volume_type: { get_param: volume_type }
+
+  server_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: private_net }
+      fixed_ips:
+        - subnet_id: { get_param: private_subnet }
+      security_groups: { get_param: security_groups }
+
+  server:
+    type: OS::Nova::Server
+    properties:
+      name: { get_param: name }
+      block_device_mapping:
+        - volume_id: { get_resource: server_volume }
+          delete_on_termination: true
+          device_name: "vda"
+      flavor: { get_param: flavor }
+      networks:
+        - port: { get_resource: server_port }
+      tags: { get_param: tags }
+      user_data_format: "RAW"
+      user_data: { get_param: user_data }
