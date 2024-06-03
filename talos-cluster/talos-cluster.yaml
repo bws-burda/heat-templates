@@ -1,0 +1,261 @@
+heat_template_version: 2021-04-16
+
+description: >
+  HOT template to create a talos cluster
+
+parameters:
+  private_net_name:
+    type: string
+    description: Name of private network to be created
+  private_net_cidr:
+    type: string
+    description: Private network address (CIDR notation)
+  public_net:
+    type: string
+    description: ID or name of public network for which floating IP addresses will be allocated
+  control_plane_flavor:
+    type: string
+    description: id or name of flavor for control_plane
+  worker_flavor:
+    type: string
+    description: id or name of flavor for workers
+  scaled_worker_count:
+    type: number
+    description: number of workers that can be scaled
+  image:
+    type: string
+    description: id or name of image
+  control_plane_volume_size:
+    type: number
+    description: size of volume in GB
+  control_plane_volume_type:
+    type: string
+    description: type of the volume
+  worker_volume_size:
+    type: number
+    description: size of volume in GB
+  worker_volume_type:
+    type: string
+    description: type of the volume
+  dns_name:
+    type: string
+    description: DNS name to assign to loadbalancer IP
+  dns_zone:
+    type: string
+    description: Zone to create DNS record in
+
+resources:
+  private_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: private_net_name }
+
+  private_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: private_net }
+      cidr: { get_param: private_net_cidr }
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: public_net }
+
+  router_interface:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router_id: { get_resource: router }
+      subnet_id: { get_resource: private_subnet }
+
+  security_group_k8s:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: k8s
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 6443
+          port_range_max: 6443
+
+  security_group_talos:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: talos
+      rules:
+        - remote_ip_prefix: 0.0.0.0/0
+          protocol: tcp
+          port_range_min: 50000
+          port_range_max: 50000
+
+  security_group_internal:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: internal
+      rules:
+        - remote_mode: "remote_group_id"
+
+  loadbalancer:
+    type: "OS::Octavia::LoadBalancer"
+    properties:
+      vip_subnet:
+        get_param: "public_net"
+
+  lb_listener_k8s:
+    type: "OS::Octavia::Listener"
+    properties:
+      protocol_port: 443
+      protocol: "TCP"
+      loadbalancer:
+        get_resource: "loadbalancer"
+
+  lb_listener_talos:
+    type: "OS::Octavia::Listener"
+    properties:
+      protocol_port: 50000
+      protocol: "TCP"
+      loadbalancer:
+        get_resource: "loadbalancer"
+
+  lb_pool_k8s:
+    type: "OS::Octavia::Pool"
+    properties:
+      lb_algorithm: "ROUND_ROBIN"
+      listener:
+        get_resource: "lb_listener_k8s"
+      protocol: "TCP"
+
+  lb_pool_talos:
+    type: "OS::Octavia::Pool"
+    properties:
+      lb_algorithm: "ROUND_ROBIN"
+      listener:
+        get_resource: "lb_listener_talos"
+      protocol: "TCP"
+
+  lb_monitor_k8s:
+    type: "OS::Octavia::HealthMonitor"
+    properties:
+      delay: 5
+      max_retries: 4
+      timeout: 10
+      type: "TCP"
+      pool:
+        get_resource: "lb_pool_k8s"
+
+  lb_monitor_talos:
+    type: "OS::Octavia::HealthMonitor"
+    properties:
+      delay: 5
+      max_retries: 4
+      timeout: 10
+      type: "TCP"
+      pool:
+        get_resource: "lb_pool_talos"
+
+  lb_pool_member_k8s:
+    type: "OS::Octavia::PoolMember"
+    properties:
+      subnet: { get_resource: private_subnet }
+      protocol_port: 6443
+      pool: { get_resource: lb_pool_k8s }
+      address: { get_attr: [control_plane, resource.server, first_address] }
+
+  lb_pool_member_talos:
+    type: "OS::Octavia::PoolMember"
+    properties:
+      subnet: { get_resource: private_subnet }
+      protocol_port: 50000
+      pool: { get_resource: lb_pool_talos }
+      address: { get_attr: [control_plane, resource.server, first_address] }
+
+  control_plane:
+    type: talos-cluster-node.yaml
+    properties:
+      name: control_plane
+      flavor: { get_param: control_plane_flavor }
+      image: { get_param: image }
+      volume_size: { get_param: control_plane_volume_size }
+      volume_type: { get_param: control_plane_volume_type }
+      security_groups:
+        list_join:
+          - ','
+          - - { get_resource: security_group_internal }
+            - { get_resource: security_group_k8s }
+            - { get_resource: security_group_talos }
+      private_net: { get_resource: private_net }
+      private_subnet: { get_resource: private_subnet }
+      tags: ["control_plane"]
+      user_data: { get_file: controlplane.yaml }
+
+  single_worker:
+    type: talos-cluster-node.yaml
+    properties:
+      name: single_worker
+      flavor: { get_param: worker_flavor }
+      image: { get_param: image }
+      volume_size: { get_param: worker_volume_size }
+      volume_type: { get_param: worker_volume_type }
+      security_groups:
+        list_join:
+          - ','
+          - - { get_resource: security_group_internal }
+            - { get_resource: security_group_talos }
+      private_net: { get_resource: private_net }
+      private_subnet: { get_resource: private_subnet }
+      tags: ["single_worker"]
+      user_data: { get_file: worker.yaml }
+
+  auto_scale_group:
+    type: OS::Heat::AutoScalingGroup
+    properties:
+      desired_capacity: { get_param: scaled_worker_count }
+      cooldown: 1
+      max_size: { get_param: scaled_worker_count }
+      min_size: 0
+      resource:
+        type: talos-cluster-node.yaml
+        properties:
+          flavor: { get_param: worker_flavor }
+          image: { get_param: image }
+          volume_size: { get_param: worker_volume_size }
+          volume_type: { get_param: worker_volume_type }
+          security_groups:
+            list_join:
+              - ','
+              - - { get_resource: security_group_internal }
+                - { get_resource: security_group_talos }
+          private_net: { get_resource: private_net }
+          private_subnet: { get_resource: private_subnet }
+          tags: ["scaled_worker"]
+          user_data: { get_file: worker.yaml }
+
+  scale_down_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: exact_capacity
+      auto_scaling_group_id: { get_resource: "auto_scale_group" }
+      cooldown: 1
+      scaling_adjustment: 0
+
+  scale_up_policy:
+    type: OS::Heat::ScalingPolicy
+    properties:
+      adjustment_type: exact_capacity
+      auto_scaling_group_id: { get_resource: "auto_scale_group" }
+      cooldown: 1
+      scaling_adjustment: { get_param: scaled_worker_count }
+
+  dns_record:
+    type: OS::Designate::RecordSet
+    properties:
+      name:
+        str_replace:
+          params:
+            name: { get_param: dns_name }
+            zone: { get_param: dns_zone }
+          template: name.zone
+      type: "A"
+      zone: { get_param: dns_zone }
+      records: [{ get_attr: [ loadbalancer, vip_address ] }]
+      ttl: 60
