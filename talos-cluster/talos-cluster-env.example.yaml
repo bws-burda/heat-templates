@@ -1,0 +1,14 @@
+parameters:
+  private_net_name: private_net_name
+  private_net_cidr: 10.10.10.0/24
+  public_net: public_net
+  control_plane_flavor: control_plane_flavor
+  worker_flavor: worker_flavor
+  scaled_worker_count: 5
+  image: Talos-1.7.1
+  control_plane_volume_size: 16
+  control_plane_volume_type: control_plane_volume_type
+  worker_volume_size: 64
+  worker_volume_type: worker_volume_type
+  dns_name: talos-cluster
+  dns_zone: example.com.
